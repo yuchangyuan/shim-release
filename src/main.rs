@@ -14,6 +14,7 @@ struct Parameter {
     file_list: Vec<String>,
     defines: BTreeMap<String, Option<String>>,
     inc_list: Vec<String>,
+    bb_set: BTreeSet<String>,
     top_set: BTreeSet<String>,
     rev: usize,
     pkg: String,
@@ -21,6 +22,7 @@ struct Parameter {
 
 enum PNext {
     #[allow(non_camel_case_types)] P_TOP,
+    #[allow(non_camel_case_types)] P_BB,
     #[allow(non_camel_case_types)] P_REV,
     #[allow(non_camel_case_types)] P_PKG,
     #[allow(non_camel_case_types)] P_NONE
@@ -36,6 +38,7 @@ fn parse_args(args: Vec<String>) -> Parameter {
     let mut defines: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut inc_list: Vec<String> = Vec::new();
     let mut top_set: BTreeSet<String> = BTreeSet::new();
+    let mut bb_set: BTreeSet<String> = BTreeSet::new();
 
     let mut rev: usize = REV_DEFAULT;
     let mut pkg: String = PKG_DEFAULT.into();
@@ -60,12 +63,17 @@ fn parse_args(args: Vec<String>) -> Parameter {
                 else if arg == "-t" { pnext = P_TOP; }
                 else if arg == "-r" { pnext = P_REV; }
                 else if arg == "-p" { pnext = P_PKG; }
+                else if arg == "-b" { pnext = P_BB; }
                 else {
                     file_list.push(arg)
                 }
             },
             P_TOP => {
                 top_set.insert(arg);
+                pnext = P_NONE;
+            },
+            P_BB => {
+                bb_set.insert(arg);
                 pnext = P_NONE;
             },
             P_REV => {
@@ -81,7 +89,7 @@ fn parse_args(args: Vec<String>) -> Parameter {
         }
     }
 
-    Parameter { file_list, defines, inc_list, top_set, rev, pkg }
+    Parameter { file_list, defines, inc_list, bb_set, top_set, rev, pkg }
 }
 
 
@@ -107,6 +115,11 @@ fn show_info(p: &Parameter) {
 
         debug!("include path list:");
         for i in p.inc_list.iter() {
+            debug!("  - {}", i);
+        }
+
+        debug!("blackbox list:");
+        for i in p.bb_set.iter() {
             debug!("  - {}", i);
         }
     }
@@ -250,6 +263,20 @@ fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
     info!("rewreite, 2nd pass...");
 
     if log_enabled!(Level::Debug) {
+        // find unused module
+        for m in module_map.keys() {
+            if !module_ref.contains(m) && !p.top_set.contains(m) {
+                debug!("  unused module {}", m);
+            }
+        }
+
+        // find unmapped module
+        for m in module_ref.iter() {
+            if !module_map.contains_key(m) && !p.bb_set.contains(m) {
+                debug!("  unmapped module {}", m);
+            }
+        }
+
         for (m, cksum) in module_map.iter() {
             if p.top_set.contains(m) {
                 debug!("  rename {} -> {}_r{}", m, m, p.rev);
@@ -258,6 +285,7 @@ fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
                 debug!("  rename {} -> {}_{:08x}", m, m, cksum);
             }
         }
+
     }
 
     for (path, syntax_tree) in st_map.iter() {
@@ -284,7 +312,7 @@ fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
                             (true,  _)           => print!("{}_r{}", str, p.rev),
                             (false, Some(cksum)) => print!("{}_{:08x}", str, cksum),
                             _                    => {
-                                warn!("  unmapped module {}", str);
+                                if !p.bb_set.contains(str) { warn!("  unmapped module {}", str); }
                                 print!("{}", str)
                             }
                         }
