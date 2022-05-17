@@ -166,6 +166,7 @@ fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
     // do two pass
     let mut module_map: BTreeMap<String, u32> = BTreeMap::new();
     let mut rename_map: BTreeMap<FileLoc, (String, bool)> = BTreeMap::new();
+    let mut module_ref: BTreeSet<String> = BTreeSet::new();
 
     // ------------- first pass --------------
     info!("rewreite, 1st pass...");
@@ -207,6 +208,8 @@ fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
                                       (mod_name.to_string(), false));
 
                     debug!("      - {}: {}", inst_name, mod_name);
+
+                    module_ref.insert(mod_name.to_string());
                 }
 
                 RefNode::ModuleDeclaration(x) => {
@@ -246,6 +249,55 @@ fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
     // -------------- 2nd pass -------------
     info!("rewreite, 2nd pass...");
 
+    if log_enabled!(Level::Debug) {
+        for (m, cksum) in module_map.iter() {
+            if p.top_set.contains(m) {
+                debug!("  rename {} -> {}_r{}", m, m, p.rev);
+            }
+            else {
+                debug!("  rename {} -> {}_{:08x}", m, m, cksum);
+            }
+        }
+    }
+
+    for (path, syntax_tree) in st_map.iter() {
+        for node in syntax_tree {
+            match node {
+                RefNode::ModuleDeclaration(x) => {
+                    if unwrap_node!(x, ModuleDeclarationAnsi, ModuleDeclarationNonansi) != None {
+                        let id = unwrap_node!(x, ModuleIdentifier).unwrap();
+                        let loc = get_identifier(id).unwrap();
+                        let name = syntax_tree.get_str(&loc).unwrap();
+
+                        if !module_ref.contains(name) && !p.top_set.contains(name) {
+                            info!("  unused module {}", name);
+                        }
+                    }
+                },
+
+                RefNode::Locate(x) => {
+                    let str = syntax_tree.get_str(x).unwrap();
+                    let loc = (path.to_string(), x.offset, x.len, x.line);
+
+                    if rename_map.contains_key(&loc) {
+                        match (p.top_set.contains(str), module_map.get(str)) {
+                            (true,  _)           => print!("{}_r{}", str, p.rev),
+                            (false, Some(cksum)) => print!("{}_{:08x}", str, cksum),
+                            _                    => {
+                                warn!("  unmapped module {}", str);
+                                print!("{}", str)
+                            }
+                        }
+                    }
+                    else {
+                        print!("{}", str)
+                    }
+                }
+
+                _ => (),
+            }
+        }
+    }
 }
 
 fn get_identifier(node: RefNode) -> Option<Locate> {
