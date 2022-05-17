@@ -1,17 +1,20 @@
 use std::{env};
 use log::{debug, info, log_enabled, warn, Level};
 use sv_parser::SyntaxTree;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, BTreeSet};
 use env_logger::Env;
 
-use sv_parser::{parse_sv, Define, Defines, DefineText};
+use sv_parser::{parse_sv, unwrap_node, Locate, RefNode, Define, Defines, DefineText};
+
+use crc::{Crc, CRC_32_CKSUM};
+
 
 #[derive(PartialEq, Clone, Debug)]
 struct Parameter {
     file_list: Vec<String>,
     defines: BTreeMap<String, Option<String>>,
     inc_list: Vec<String>,
-    top_list: Vec<String>,
+    top_set: BTreeSet<String>,
     rev: usize,
     pkg: String,
 }
@@ -32,7 +35,7 @@ fn parse_args(args: Vec<String>) -> Parameter {
     let mut file_list: Vec<String> = Vec::new();
     let mut defines: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut inc_list: Vec<String> = Vec::new();
-    let mut top_list: Vec<String> = vec!();
+    let mut top_set: BTreeSet<String> = BTreeSet::new();
 
     let mut rev: usize = REV_DEFAULT;
     let mut pkg: String = PKG_DEFAULT.into();
@@ -62,7 +65,7 @@ fn parse_args(args: Vec<String>) -> Parameter {
                 }
             },
             P_TOP => {
-                top_list.push(arg);
+                top_set.insert(arg);
                 pnext = P_NONE;
             },
             P_REV => {
@@ -78,7 +81,7 @@ fn parse_args(args: Vec<String>) -> Parameter {
         }
     }
 
-    Parameter { file_list, defines, inc_list, top_list, rev, pkg }
+    Parameter { file_list, defines, inc_list, top_set, rev, pkg }
 }
 
 
@@ -86,7 +89,7 @@ fn show_info(p: &Parameter) {
     info!("package {}, rev {}", p.pkg, p.rev);
     if p.pkg == PKG_DEFAULT { warn!("package not set, use default '{}'", p.pkg) }
     if p.rev == REV_DEFAULT { warn!("revision not set, use default {}", p.rev) }
-    if p.top_list.is_empty() { warn!("top list is empty") }
+    if p.top_set.is_empty() { warn!("top set is empty") }
 
     if log_enabled!(Level::Debug) {
         debug!("define list:");
@@ -136,10 +139,10 @@ fn to_defines(defs: &BTreeMap<String, Option<String>>) -> Defines {
 }
 
 
-fn parse_files(p: &Parameter) -> Vec<SyntaxTree> {
+fn parse_files(p: &Parameter) -> BTreeMap<String, SyntaxTree> {
     info!("parse files");
 
-    let mut res: Vec<SyntaxTree> = vec![];
+    let mut res: BTreeMap<String, SyntaxTree> = BTreeMap::new();
 
     let defines = to_defines(&p.defines);
 
@@ -148,10 +151,114 @@ fn parse_files(p: &Parameter) -> Vec<SyntaxTree> {
 
         let (syntax_tree, _) = parse_sv(&file, &defines, &p.inc_list, false, false).unwrap();
 
-        res.push(syntax_tree)
+        res.insert(file.to_string(), syntax_tree);
     }
 
     res
+}
+
+pub const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_CKSUM);
+
+type Loc = (usize, usize, u32);
+type FileLoc = (String, usize, usize, u32);
+
+fn rewrite(p: &Parameter, st_map: BTreeMap<String, SyntaxTree>) {
+    // do two pass
+    let mut module_map: BTreeMap<String, u32> = BTreeMap::new();
+    let mut rename_map: BTreeMap<FileLoc, (String, bool)> = BTreeMap::new();
+
+    // ------------- first pass --------------
+    info!("rewreite, 1st pass...");
+    for (path, syntax_tree) in st_map.iter() {
+        let mut whitespace_or_comment: BTreeSet<Loc> = BTreeSet::new();
+        let mut curr_module: Option<String> = None;
+        let mut curr_digest = CRC32.digest();
+
+        info!("  {} ...", path);
+
+        for node in syntax_tree {
+            match node {
+                RefNode::Locate(x) => {
+                    if whitespace_or_comment.contains(&(x.offset, x.len, x.line)) {
+                        continue;
+                    }
+                    else {
+                        let str = syntax_tree.get_str(x).unwrap();
+                        curr_digest.update(str.as_bytes());
+                    }
+                }
+
+                RefNode::WhiteSpace(x) => {
+                    if let Some(RefNode::Locate(loc)) = unwrap_node!(x, Locate) {
+                        whitespace_or_comment.insert((loc.offset, loc.len, loc.line));
+                    }
+                }
+
+                RefNode::ModuleInstantiation(x) => {
+                    let mid = unwrap_node!(x, ModuleIdentifier).unwrap();
+                    let mid_loc = get_identifier(mid).unwrap();
+                    let mod_name = syntax_tree.get_str(&mid_loc).unwrap();
+
+                    let iid = unwrap_node!(x, InstanceIdentifier).unwrap();
+                    let iid_loc = get_identifier(iid).unwrap();
+                    let inst_name = syntax_tree.get_str(&iid_loc).unwrap();
+
+                    rename_map.insert((path.clone(), mid_loc.offset, mid_loc.len, mid_loc.line),
+                                      (mod_name.to_string(), false));
+
+                    debug!("      - {}: {}", inst_name, mod_name);
+                }
+
+                RefNode::ModuleDeclaration(x) => {
+                    if unwrap_node!(x, ModuleDeclarationAnsi, ModuleDeclarationNonansi) != None {
+                        let id = unwrap_node!(x, ModuleIdentifier).unwrap();
+                        let loc = get_identifier(id).unwrap();
+                        let name = syntax_tree.get_str(&loc).unwrap();
+
+                        rename_map.insert((path.clone(), loc.offset, loc.len, loc.line),
+                                          (name.to_string(), true));
+
+                        if let Some(m) = curr_module {
+                            if module_map.contains_key(&m) { warn!("    module {} redefined", &m); }
+                            module_map.insert(m, curr_digest.finalize());
+                        }
+
+                        debug!("    module {}", name);
+
+                        curr_module = Some(name.to_string());
+                        curr_digest = CRC32.digest();
+
+                        // uniquify by pkg & rev
+                        curr_digest.update(p.pkg.as_bytes());
+                        curr_digest.update(p.rev.to_string().as_bytes());
+                    }
+                }
+
+                _ => (),
+            }
+        }
+
+        if let Some(m) = curr_module {
+            module_map.insert(m, curr_digest.finalize());
+        }
+    }
+
+    // -------------- 2nd pass -------------
+    info!("rewreite, 2nd pass...");
+
+}
+
+fn get_identifier(node: RefNode) -> Option<Locate> {
+    // unwrap_node! can take multiple types
+    match unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
+        Some(RefNode::SimpleIdentifier(x)) => {
+            return Some(x.nodes.0);
+        }
+        Some(RefNode::EscapedIdentifier(x)) => {
+            return Some(x.nodes.0);
+        }
+        _ => None,
+    }
 }
 
 fn main() {
@@ -162,5 +269,6 @@ fn main() {
 
     show_info(&p);
 
-    let _syntax_tree_list = parse_files(&p);
+    let syntax_tree_map = parse_files(&p);
+    rewrite(&p, syntax_tree_map);
 }
