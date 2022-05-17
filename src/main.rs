@@ -1,7 +1,10 @@
 use std::{env};
 use log::{debug, info, log_enabled, warn, Level};
-use std::collections::{BTreeMap};
+use sv_parser::SyntaxTree;
+use std::collections::{BTreeMap, HashMap};
 use env_logger::Env;
+
+use sv_parser::{parse_sv, Define, Defines, DefineText};
 
 #[derive(PartialEq, Clone, Debug)]
 struct Parameter {
@@ -106,11 +109,58 @@ fn show_info(p: &Parameter) {
     }
 }
 
+fn to_defines(defs: &BTreeMap<String, Option<String>>) -> Defines {
+    let mut res: Defines = HashMap::new();
+
+    for (k, v) in defs.iter() {
+        let v1 = match v {
+            None => Define {
+                identifier: k.clone(),
+                arguments: vec![],
+                text: None
+            },
+            Some(x) => Define {
+                identifier: k.clone(),
+                arguments: vec![],
+                text: Some(DefineText {
+                    text: x.to_string(),
+                    origin: None
+                })
+            }
+        };
+
+        res.insert(k.to_string(), Some(v1));
+    }
+
+    res
+}
+
+
+fn parse_files(p: &Parameter) -> Vec<SyntaxTree> {
+    info!("parse files");
+
+    let mut res: Vec<SyntaxTree> = vec![];
+
+    let defines = to_defines(&p.defines);
+
+    for file in p.file_list.iter() {
+        info!("  parsing {} ...", file);
+
+        let (syntax_tree, _) = parse_sv(&file, &defines, &p.inc_list, false, false).unwrap();
+
+        res.push(syntax_tree)
+    }
+
+    res
+}
+
 fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = env::args().skip(1).collect();
     let p = parse_args(args);
 
-    show_info(&p)
+    show_info(&p);
+
+    let _syntax_tree_list = parse_files(&p);
 }
