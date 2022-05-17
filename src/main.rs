@@ -1,6 +1,6 @@
 use std::{env};
 use log::{debug, info, log_enabled, warn, Level};
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap};
 use env_logger::Env;
 
 #[derive(PartialEq, Clone, Debug)]
@@ -81,7 +81,7 @@ fn parse_args(args: Vec<String>) -> Parameter {
 
 fn show_info(p: &Parameter) {
     info!("package {}, rev {}", p.pkg, p.rev);
-    if p.pkg == PKG_DEFAULT { warn!("package not set, use default {}", p.pkg) }
+    if p.pkg == PKG_DEFAULT { warn!("package not set, use default '{}'", p.pkg) }
     if p.rev == REV_DEFAULT { warn!("revision not set, use default {}", p.rev) }
     if p.top_list.is_empty() { warn!("top list is empty") }
 
@@ -107,7 +107,7 @@ fn show_info(p: &Parameter) {
 }
 
 fn main() {
-    env_logger::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = env::args().skip(1).collect();
     let p = parse_args(args);
